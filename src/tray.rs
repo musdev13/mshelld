@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::sync::Arc;
 use system_tray::client::{ActivateRequest, Client, Event, UpdateEvent};
-use system_tray::item::StatusNotifierItem;
+use system_tray::item::{IconPixmap, StatusNotifierItem};
 use system_tray::menu::{MenuItem, TrayMenu};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -24,6 +24,7 @@ pub struct TrayItemData {
     pub address: String,
     pub title: Option<String>,
     pub icon_name: Option<String>,
+    pub icon_pixmap_path: Option<String>,
     pub has_menu: bool,
     pub menu: Vec<TrayMenuEntry>,
 }
@@ -52,12 +53,77 @@ fn menu_to_entries(menu: &TrayMenu) -> Vec<TrayMenuEntry> {
     menu.submenus.iter().map(menu_item_to_entry).collect()
 }
 
+fn pixmap_to_png(address: &str, pixmap: &IconPixmap) -> Option<String> {
+    if pixmap.width <= 0 || pixmap.height <= 0 {
+        return None;
+    }
+    let w = pixmap.width as u32;
+    let h = pixmap.height as u32;
+    let expected = (w * h * 4) as usize;
+    if pixmap.pixels.len() < expected {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(expected);
+    for i in 0..(w * h) as usize {
+        let base = i * 4;
+        let a = pixmap.pixels[base];
+        let r = pixmap.pixels[base + 1];
+        let g = pixmap.pixels[base + 2];
+        let b = pixmap.pixels[base + 3];
+        bytes.push(r);
+        bytes.push(g);
+        bytes.push(b);
+        bytes.push(a);
+    }
+    let buf: image::RgbaImage = image::ImageBuffer::from_raw(w, h, bytes)?;
+    let safe: String = address
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let path = format!("/tmp/mshelld-tray-{safe}.png");
+    if buf.save(&path).is_ok() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn pick_icon_pixmap(address: &str, item: &StatusNotifierItem) -> Option<String> {
+    let pixmaps = item.icon_pixmap.as_ref()?;
+    let mut best: Option<&IconPixmap> = None;
+    for icon in pixmaps.iter() {
+        if icon.width <= 0 || icon.height <= 0 {
+            continue;
+        }
+        match best {
+            None => best = Some(icon),
+            Some(b) => {
+                if icon.width > b.width {
+                    best = Some(icon);
+                }
+            }
+        }
+    }
+    best.and_then(|pixmap| pixmap_to_png(address, pixmap))
+}
+
 fn item_to_data(address: &str, item: &StatusNotifierItem, menu: Option<&TrayMenu>) -> TrayItemData {
+    let icon_name = if item.icon_name.as_deref().map_or(true, |s| s.is_empty()) {
+        None
+    } else {
+        item.icon_name.clone()
+    };
+    let icon_pixmap_path = if icon_name.is_some() {
+        None
+    } else {
+        pick_icon_pixmap(address, item)
+    };
     TrayItemData {
         id: item.id.clone(),
         address: address.to_string(),
         title: item.title.clone(),
-        icon_name: item.icon_name.clone(),
+        icon_name,
+        icon_pixmap_path,
         has_menu: item.menu.is_some(),
         menu: menu.map(menu_to_entries).unwrap_or_default(),
     }
